@@ -61,6 +61,12 @@ export const idParamSchema = z.string().uuid("Geçersiz kimlik.");
 
 export const passkeyLoginOptionsSchema = z.object({ phone: phoneSchema });
 
+/** Giriş/kayıt akışının ilk adımı: yalnızca telefon. */
+export const identifySchema = z.object({ phone: phoneSchema });
+
+/** Kayıtlı olmayan numara: ad soyad + passkey ile üyelik. */
+export const signupOptionsSchema = z.object({ phone: phoneSchema, fullName: fullNameSchema });
+
 export const passkeyVerifySchema = z.object({
   challengeId: z.string().uuid(),
   credential: z.unknown(),

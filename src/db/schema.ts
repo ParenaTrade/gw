@@ -113,6 +113,8 @@ export const authChallenges = pgTable("auth_challenges", {
   challenge: text("challenge").notNull(),
   purpose: text("purpose").notNull(),
   phone: text("phone"),
+  /** Kayıt (signup) challenge'ında henüz üye olmayan kişinin ad soyadı. */
+  fullName: text("full_name"),
   memberId: uuid("member_id"),
   expiresAt: ts("expires_at").notNull(),
   consumedAt: ts("consumed_at"),

@@ -1,9 +1,11 @@
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { db } from "@/db";
 import { authChallenges } from "@/db/schema";
-import { randomToken } from "@/lib/security/hash";
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+
+/** signup: henüz üyesi olmayan kişinin telefon + ad soyad ile passkey kaydı. */
+export type ChallengePurpose = "registration" | "authentication" | "signup";
 
 /**
  * WebAuthn RP yapılandırması. Env tanımlı değilse istek host'undan türetilir
@@ -22,17 +24,25 @@ export function getWebAuthnConfig(req: Request) {
   return { rpID, origin, rpName: "KUponum" };
 }
 
+/**
+ * `challenge`, generateRegistrationOptions/generateAuthenticationOptions'ın
+ * döndürdüğü `options.challenge` olmalıdır (base64url). Tarayıcı bu değeri
+ * imzalar; doğrulamada `expectedChallenge` olarak aynısı beklenir.
+ */
 export async function createChallenge(input: {
-  purpose: "registration" | "authentication";
+  challenge: string;
+  purpose: ChallengePurpose;
   phone?: string;
+  fullName?: string;
   memberId?: string;
 }) {
   const [row] = await db
     .insert(authChallenges)
     .values({
-      challenge: randomToken(32),
+      challenge: input.challenge,
       purpose: input.purpose,
       phone: input.phone ?? null,
+      fullName: input.fullName ?? null,
       memberId: input.memberId ?? null,
       expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS).toISOString(),
     })
@@ -41,7 +51,7 @@ export async function createChallenge(input: {
 }
 
 /** Tek kullanımlık challenge — atomik tüketim. */
-export async function consumeChallenge(id: string, purpose: "registration" | "authentication") {
+export async function consumeChallenge(id: string, purpose: ChallengePurpose) {
   const [row] = await db
     .update(authChallenges)
     .set({ consumedAt: new Date().toISOString() })

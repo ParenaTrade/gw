@@ -15,7 +15,6 @@ import {
 import { passkeyVerifySchema } from "@/lib/validation/schemas";
 import { consumeChallenge, getWebAuthnConfig } from "@/lib/auth/webauthn";
 import { writeAudit } from "@/lib/audit/log";
-import { isSupabaseConfigured } from "@/lib/supabase/env";
 
 /**
  * Passkey kaydı doğrulama. Yalnızca credential PUBLIC key saklanır;
@@ -24,9 +23,6 @@ import { isSupabaseConfigured } from "@/lib/supabase/env";
 export async function POST(req: Request) {
   return handleRoute(req, async () => {
     assertSameOrigin(req);
-    if (isSupabaseConfigured()) {
-      throw new ApiError(501, "PASSKEY_SUPABASE_MANAGED", "Bu dağıtımda passkey yönetimi Supabase Auth üzerinden yapılır.");
-    }
     const user = await requireMember();
     const body = await readJson(req, passkeyVerifySchema);
     const challenge = await consumeChallenge(body.challengeId, "registration");
@@ -42,7 +38,7 @@ export async function POST(req: Request) {
         expectedChallenge: challenge.challenge,
         expectedOrigin: origin,
         expectedRPID: rpID,
-        requireUserVerification: false,
+        requireUserVerification: true,
       });
     } catch {
       throw new ApiError(400, "PASSKEY_VERIFY_FAILED", "Passkey doğrulanamadı. Tekrar deneyin.");

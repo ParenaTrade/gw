@@ -15,9 +15,9 @@ export default async function LoginPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Telefon ile giriş</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Giriş / Kayıt</h1>
         <p className="mt-1 text-sm text-muted">
-          Birincil giriş: telefon + OTP. Sonraki girişlerde passkey / cihaz biyometrisi kullanılabilir.
+          Telefon numaranızı girin. Parmak izi veya Face ID ile giriş yapın; hesabınız yoksa saniyeler içinde oluşturun.
         </p>
       </div>
       <Suspense>

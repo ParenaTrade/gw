@@ -3,17 +3,13 @@ import { db } from "@/db";
 import { memberCredentials } from "@/db/schema";
 import { generateRegistrationOptions } from "@simplewebauthn/server";
 import type { AuthenticatorTransport } from "@simplewebauthn/server";
-import { assertSameOrigin, handleRoute, jsonOk, requireMember, ApiError } from "@/lib/security/api";
+import { assertSameOrigin, handleRoute, jsonOk, requireMember } from "@/lib/security/api";
 import { createChallenge, getWebAuthnConfig } from "@/lib/auth/webauthn";
-import { isSupabaseConfigured } from "@/lib/supabase/env";
 
 /** Passkey kayıt seçenekleri — oturum açık üye için. */
 export async function POST(req: Request) {
   return handleRoute(req, async () => {
     assertSameOrigin(req);
-    if (isSupabaseConfigured()) {
-      throw new ApiError(501, "PASSKEY_SUPABASE_MANAGED", "Bu dağıtımda passkey yönetimi Supabase Auth üzerinden yapılır.");
-    }
     const user = await requireMember();
     const { rpID, rpName } = getWebAuthnConfig(req);
 
@@ -34,11 +30,15 @@ export async function POST(req: Request) {
       })),
       authenticatorSelection: {
         residentKey: "preferred",
-        userVerification: "preferred",
+        userVerification: "required",
       },
     });
 
-    const challenge = await createChallenge({ purpose: "registration", memberId: user.member.id });
+    const challenge = await createChallenge({
+      challenge: options.challenge,
+      purpose: "registration",
+      memberId: user.member.id,
+    });
     return jsonOk({ challengeId: challenge.id, options });
   });
 }

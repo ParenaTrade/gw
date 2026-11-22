@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createClient } from "@supabase/supabase-js";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 
@@ -14,6 +15,22 @@ import { isSupabaseConfigured } from "@/lib/supabase/env";
 
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const BUCKET = "coupon-images";
+
+/**
+ * Depolama istemcisi. Giriş passkey + uygulama oturumu ile yapıldığı için
+ * istekte Supabase kullanıcı JWT'si yoktur; bu yüzden sunucuda
+ * SUPABASE_SERVICE_ROLE_KEY tanımlıysa onunla bağlanılır (yalnızca server,
+ * asla NEXT_PUBLIC_*). Erişim kontrolü (owner/partner) API route'larındadır.
+ * Tanımsızsa eski davranış: kullanıcı oturumlu Supabase istemcisi.
+ */
+async function getStorageClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (url && serviceKey) {
+    return createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  }
+  return createSupabaseServerClient();
+}
 
 function localRoot(): string {
   const configured = process.env.LOCAL_STORAGE_DIR?.trim();
@@ -63,7 +80,7 @@ export function couponImagePath(memberId: string, couponId: string, imageType: s
 
 export async function putCouponImage(storagePath: string, bytes: Buffer, mime: string): Promise<void> {
   if (isSupabaseConfigured()) {
-    const supabase = await createSupabaseServerClient();
+    const supabase = await getStorageClient();
     if (!supabase) throw new Error("Supabase storage istemcisi oluşturulamadı.");
     const { error } = await supabase.storage
       .from(BUCKET)
@@ -79,7 +96,7 @@ export async function putCouponImage(storagePath: string, bytes: Buffer, mime: s
 
 export async function readCouponImage(storagePath: string): Promise<Buffer | null> {
   if (isSupabaseConfigured()) {
-    const supabase = await createSupabaseServerClient();
+    const supabase = await getStorageClient();
     if (!supabase) return null;
     const { data, error } = await supabase.storage.from(BUCKET).download(storagePath);
     if (error || !data) return null;

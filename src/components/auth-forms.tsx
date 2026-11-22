@@ -5,117 +5,232 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Fingerprint, KeyRound, MessageSquareLock } from "lucide-react";
+import { Fingerprint, KeyRound, MessageSquareLock, UserPlus } from "lucide-react";
 import { Alert, Button, Card, Input } from "@/components/ui";
 import { apiPost } from "@/lib/api-client";
-import { maskPhone } from "@/lib/format";
+import { formatPhoneDisplay, maskPhone } from "@/lib/format";
 
 const PENDING_KEY = "kuponum_pending_login";
 
-const loginSchema = z.object({
+const phoneFormSchema = z.object({
   phone: z.string().min(10, "Telefon numarası girin (örn. 555 111 22 33)."),
-  fullName: z.string().trim().max(80).optional(),
 });
-type LoginForm = z.infer<typeof loginSchema>;
+type PhoneForm = z.infer<typeof phoneFormSchema>;
+
+const signupFormSchema = z.object({
+  fullName: z.string().trim().min(3, "Ad soyad en az 3 karakter olmalı.").max(80, "Ad soyad en fazla 80 karakter olmalı."),
+});
+type SignupForm = z.infer<typeof signupFormSchema>;
 
 type OtpResponse = { sent: boolean; demo: boolean; devCode?: string };
+type IdentifyResponse = { phone: string; registered: boolean; hasPasskey: boolean; otpFallback: boolean };
+type Step = "phone" | "login" | "signup" | "nopasskey";
 
+function errorName(e: unknown): string {
+  return e instanceof Error ? e.name : "";
+}
+
+/** WebAuthn tarayıcı hatalarını anlaşılır Türkçe mesaja çevirir; API hatalarını olduğu gibi gösterir. */
+function passkeyErrorMessage(e: unknown, fallback: string): string {
+  const name = errorName(e);
+  if (name === "NotAllowedError" || name === "AbortError") {
+    return "İşlem iptal edildi veya zaman aşımına uğradı. Tekrar deneyin.";
+  }
+  if (name === "InvalidStateError") return "Bu cihazda bu hesap için zaten bir passkey var.";
+  if (name === "NotSupportedError" || name === "SecurityError") {
+    return "Bu cihaz veya tarayıcı passkey desteklemiyor.";
+  }
+  if (e instanceof Error && e.message) return e.message;
+  return fallback;
+}
+
+/**
+ * Tek ekranlı giriş / kayıt:
+ *  1. Telefon numarası girilir.
+ *  2a. Kayıtlı + passkey  → parmak izi / Face ID ile giriş.
+ *  2b. Kayıtsız           → ad soyad + parmak izi ile kayıt (üyelik + oturum).
+ *  2c. Kayıtlı, passkey yok (eski/seed hesap) → yalnızca demo modunda OTP yedeği.
+ * OTP ve PIN yöntemleri daha sonra tanımlanacak.
+ */
 export function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next") ?? "/kuponum";
+  const [step, setStep] = useState<Step>("phone");
+  const [phone, setPhone] = useState("");
+  const [otpFallback, setOtpFallback] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [passkeyBusy, setPasskeyBusy] = useState(false);
-  const form = useForm<LoginForm>({ resolver: zodResolver(loginSchema), defaultValues: { phone: "", fullName: "" } });
+  const [busy, setBusy] = useState(false);
 
-  async function sendOtp(values: LoginForm) {
+  const phoneForm = useForm<PhoneForm>({ resolver: zodResolver(phoneFormSchema), defaultValues: { phone: "" } });
+  const signupForm = useForm<SignupForm>({ resolver: zodResolver(signupFormSchema), defaultValues: { fullName: "" } });
+
+  function reset() {
+    setStep("phone");
     setError(null);
-    try {
-      const res = await apiPost<OtpResponse>("/api/auth/otp", {
-        phone: values.phone,
-        ...(values.fullName ? { fullName: values.fullName } : {}),
-      });
-      sessionStorage.setItem(
-        PENDING_KEY,
-        JSON.stringify({ phone: values.phone, devCode: res.devCode ?? null, demo: res.demo })
-      );
-      router.push(`/verify?phone=${encodeURIComponent(values.phone)}&next=${encodeURIComponent(next)}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Kod gönderilemedi.");
-    }
+    setBusy(false);
   }
 
-  async function passkeyLogin() {
+  async function passkeyLogin(targetPhone: string, auto = false) {
     setError(null);
-    setPasskeyBusy(true);
+    setBusy(true);
     try {
-      const phone = form.getValues("phone");
-      if (!phone || phone.length < 10) {
-        setError("Passkey ile giriş için önce telefon numaranızı girin.");
+      const { browserSupportsWebAuthn, startAuthentication } = await import("@simplewebauthn/browser");
+      if (!browserSupportsWebAuthn()) {
+        setError("Bu cihaz veya tarayıcı passkey desteklemiyor.");
         return;
       }
-      const { startAuthentication } = await import("@simplewebauthn/browser");
-      const { challengeId, options } = await apiPost<{ challengeId: string; options: Parameters<typeof startAuthentication>[0]["optionsJSON"] }>(
-        "/api/auth/passkey/login/options",
-        { phone }
-      );
+      const { challengeId, options } = await apiPost<{
+        challengeId: string;
+        options: Parameters<typeof startAuthentication>[0]["optionsJSON"];
+      }>("/api/auth/passkey/login/options", { phone: targetPhone });
       const credential = await startAuthentication({ optionsJSON: options });
       await apiPost("/api/auth/passkey/login/verify", { challengeId, credential });
       router.push(next);
       router.refresh();
     } catch (e) {
-      setError(
-        e instanceof Error && e.message ? e.message : "Passkey girişi başarısız. OTP ile devam edin."
-      );
+      // Otomatik denemede tarayıcı kullanıcı hareketi istemediyse sessizce düğmeye düş.
+      if (auto && errorName(e) === "NotAllowedError") return;
+      setError(passkeyErrorMessage(e, "Giriş yapılamadı. Tekrar deneyin."));
     } finally {
-      setPasskeyBusy(false);
+      setBusy(false);
     }
   }
 
-  return (
-    <div className="space-y-4">
+  async function identify(values: PhoneForm) {
+    setError(null);
+    try {
+      const res = await apiPost<IdentifyResponse>("/api/auth/identify", { phone: values.phone });
+      setPhone(res.phone);
+      setOtpFallback(res.otpFallback);
+      if (!res.registered) {
+        setStep("signup");
+      } else if (res.hasPasskey) {
+        setStep("login");
+        void passkeyLogin(res.phone, true);
+      } else {
+        setStep("nopasskey");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Numara kontrol edilemedi.");
+    }
+  }
+
+  async function passkeySignup(values: SignupForm) {
+    setError(null);
+    setBusy(true);
+    try {
+      const { browserSupportsWebAuthn, startRegistration } = await import("@simplewebauthn/browser");
+      if (!browserSupportsWebAuthn()) {
+        setError("Bu cihaz veya tarayıcı passkey desteklemiyor.");
+        return;
+      }
+      const { challengeId, options } = await apiPost<{
+        challengeId: string;
+        options: Parameters<typeof startRegistration>[0]["optionsJSON"];
+      }>("/api/auth/passkey/signup/options", { phone, fullName: values.fullName });
+      const credential = await startRegistration({ optionsJSON: options });
+      await apiPost("/api/auth/passkey/signup/verify", { challengeId, credential });
+      router.push(next);
+      router.refresh();
+    } catch (e) {
+      setError(passkeyErrorMessage(e, "Kayıt tamamlanamadı. Tekrar deneyin."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendOtp() {
+    setError(null);
+    setBusy(true);
+    try {
+      const res = await apiPost<OtpResponse>("/api/auth/otp", { phone });
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify({ phone, devCode: res.devCode ?? null, demo: res.demo }));
+      router.push(`/verify?phone=${encodeURIComponent(phone)}&next=${encodeURIComponent(next)}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Kod gönderilemedi.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (step === "phone") {
+    return (
       <Card className="p-5">
-        <form onSubmit={form.handleSubmit(sendOtp)} className="space-y-4">
+        <form onSubmit={phoneForm.handleSubmit(identify)} className="space-y-4">
           <Input
             label="Telefon numarası"
             prefix="+90"
             inputMode="tel"
             autoComplete="tel"
             placeholder="555 111 22 33"
-            error={form.formState.errors.phone?.message}
-            {...form.register("phone")}
-          />
-          <Input
-            label="Ad Soyad (ilk kayıt için)"
-            autoComplete="name"
-            placeholder="Adınız Soyadınız"
-            hint="Üye değilseniz kaydınız OTP doğrulamasıyla oluşturulur."
-            {...form.register("fullName")}
+            autoFocus
+            error={phoneForm.formState.errors.phone?.message}
+            {...phoneForm.register("phone")}
           />
           {error ? <Alert tone="danger">{error}</Alert> : null}
-          <Button type="submit" size="lg" className="w-full" loading={form.formState.isSubmitting}>
-            <MessageSquareLock className="size-5" aria-hidden /> Doğrulama Kodu Gönder
+          <Button type="submit" size="lg" className="w-full" loading={phoneForm.formState.isSubmitting}>
+            Devam Et
           </Button>
-          <Button type="button" variant="secondary" className="w-full" loading={passkeyBusy} onClick={() => void passkeyLogin()}>
-            <Fingerprint className="size-5" aria-hidden /> Passkey ile Giriş
-          </Button>
+          <p className="text-center text-xs text-muted">
+            Kayıtlıysanız parmak izi / Face ID ile giriş yaparsınız. Değilseniz adınızı girip aynı yöntemle kayıt olursunuz.
+          </p>
         </form>
       </Card>
+    );
+  }
 
-      <Alert tone="info">
-        <p className="font-semibold">Demo ortamı</p>
-        <p className="mt-1">
-          SMS sağlayıcısı bağlı olmadığı için kod ekranda gösterilir. Hazır hesaplar: üye{" "}
-          <button type="button" className="cursor-pointer font-mono underline underline-offset-2" onClick={() => form.setValue("phone", "5551112233")}>
-            555 111 22 33
-          </button>{" "}
-          · partner{" "}
-          <button type="button" className="cursor-pointer font-mono underline underline-offset-2" onClick={() => form.setValue("phone", "5559990000")}>
-            555 999 00 00
-          </button>
-        </p>
-      </Alert>
-    </div>
+  return (
+    <Card className="space-y-4 p-5">
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-raised px-3.5 py-3">
+        <span className="font-mono text-sm">{formatPhoneDisplay(phone)}</span>
+        <button type="button" className="cursor-pointer text-sm text-accent underline underline-offset-2" onClick={reset}>
+          Değiştir
+        </button>
+      </div>
+
+      {step === "login" ? (
+        <div className="space-y-4">
+          <p className="text-sm text-muted">Parmak izi, Face ID veya cihaz kilidinizle devam edin.</p>
+          {error ? <Alert tone="danger">{error}</Alert> : null}
+          <Button type="button" size="lg" className="w-full" loading={busy} onClick={() => void passkeyLogin(phone)}>
+            <Fingerprint className="size-5" aria-hidden /> Parmak İzi ile Giriş Yap
+          </Button>
+        </div>
+      ) : null}
+
+      {step === "signup" ? (
+        <form onSubmit={signupForm.handleSubmit(passkeySignup)} className="space-y-4">
+          <Alert tone="info">Bu numara kayıtlı değil. Adınızı girin, ardından parmak izi / Face ID ile hesabınızı oluşturun.</Alert>
+          <Input
+            label="Ad Soyad"
+            autoComplete="name"
+            placeholder="Adınız Soyadınız"
+            autoFocus
+            error={signupForm.formState.errors.fullName?.message}
+            {...signupForm.register("fullName")}
+          />
+          {error ? <Alert tone="danger">{error}</Alert> : null}
+          <Button type="submit" size="lg" className="w-full" loading={busy}>
+            <UserPlus className="size-5" aria-hidden /> Parmak İzi ile Kayıt Ol
+          </Button>
+        </form>
+      ) : null}
+
+      {step === "nopasskey" ? (
+        <div className="space-y-4">
+          <Alert tone="warn">Bu numara için henüz passkey tanımlı değil.</Alert>
+          {error ? <Alert tone="danger">{error}</Alert> : null}
+          {otpFallback ? (
+            <Button type="button" variant="secondary" className="w-full" loading={busy} onClick={() => void sendOtp()}>
+              <MessageSquareLock className="size-5" aria-hidden /> Demo: Kodla Giriş Yap
+            </Button>
+          ) : (
+            <p className="text-sm text-muted">Doğrulama kodu / PIN ile giriş yöntemi yakında eklenecek.</p>
+          )}
+        </div>
+      ) : null}
+    </Card>
   );
 }
 
