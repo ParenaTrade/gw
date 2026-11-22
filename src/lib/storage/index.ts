@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
@@ -15,7 +16,24 @@ export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const BUCKET = "coupon-images";
 
 function localRoot(): string {
-  return process.env.LOCAL_STORAGE_DIR?.trim() || path.join(process.cwd(), "storage", BUCKET);
+  const configured = process.env.LOCAL_STORAGE_DIR?.trim();
+  if (configured) return configured;
+  // Vercel'de dosya sistemi salt-okunur; yalnızca /tmp yazılabilir.
+  // (Kalıcı depo için Supabase Storage kullanın; /tmp geçicidir.)
+  if (process.env.VERCEL) return path.join(os.tmpdir(), BUCKET);
+  return path.join(/*turbopackIgnore: true*/ process.cwd(), "storage", BUCKET);
+}
+
+/**
+ * Yerel depoda storagePath'i güvenli biçimde çözer; kök dizin dışına
+ * çıkan (path traversal) yolları null döner.
+ * `turbopackIgnore`: yol çalışma zamanında belirlendiği için Turbopack'in
+ * tüm projeyi trace etmesini (build uyarısı + dev. boyutu) engeller.
+ */
+function resolveLocalPath(storagePath: string): string | null {
+  const root = path.resolve(/*turbopackIgnore: true*/ localRoot());
+  const target = path.resolve(/*turbopackIgnore: true*/ root, storagePath);
+  return target.startsWith(root + path.sep) ? target : null;
 }
 
 export function detectImageMime(bytes: Buffer): string | null {
@@ -53,12 +71,10 @@ export async function putCouponImage(storagePath: string, bytes: Buffer, mime: s
     if (error) throw new Error(`Storage yükleme hatası: ${error.message}`);
     return;
   }
-  const target = path.resolve(localRoot(), storagePath);
-  if (!target.startsWith(path.resolve(localRoot()) + path.sep)) {
-    throw new Error("Geçersiz storage path.");
-  }
-  await mkdir(path.dirname(target), { recursive: true });
-  await writeFile(target, bytes, { flag: "wx" });
+  const target = resolveLocalPath(storagePath);
+  if (!target) throw new Error("Geçersiz storage path.");
+  await mkdir(/*turbopackIgnore: true*/ path.dirname(target), { recursive: true });
+  await writeFile(/*turbopackIgnore: true*/ target, bytes, { flag: "wx" });
 }
 
 export async function readCouponImage(storagePath: string): Promise<Buffer | null> {
@@ -69,10 +85,10 @@ export async function readCouponImage(storagePath: string): Promise<Buffer | nul
     if (error || !data) return null;
     return Buffer.from(await data.arrayBuffer());
   }
-  const target = path.resolve(localRoot(), storagePath);
-  if (!target.startsWith(path.resolve(localRoot()) + path.sep)) return null;
+  const target = resolveLocalPath(storagePath);
+  if (!target) return null;
   try {
-    return await readFile(target);
+    return await readFile(/*turbopackIgnore: true*/ target);
   } catch {
     return null;
   }
