@@ -1,5 +1,6 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+import { buildPoolConfig } from "./config";
 
 type Db = ReturnType<typeof drizzle>;
 
@@ -26,7 +27,7 @@ function getPool(): Pool {
   }
   // Pool'u production'da da global'e yazıyoruz: serverless örneği sıcak
   // kaldığı sürece bağlantılar yeniden kullanılır.
-  const pool = new Pool({ connectionString: databaseUrl });
+  const pool = new Pool(buildPoolConfig(databaseUrl));
   globalForDb.__arenaNextJsPostgresqlPool = pool;
   return pool;
 }
