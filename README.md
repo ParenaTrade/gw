@@ -107,6 +107,12 @@ npm run dev
 5. Uzun OCR/AI işleri Vercel request timeout'u nedeniyle Faz 2'de job/queue
    (Supabase Edge Function + worker) olarak ayrılır.
 
+## Sorun giderme
+
+`https://<alan-adiniz>/api/health` kurulum teşhisi verir (şifre/adres asla gösterilmez):
+`DATABASE_URL_MISSING`, `IPV6_UNREACHABLE` (pooler adresi kullanın), `AUTH_FAILED`,
+`POOLER_USER_INVALID`, `TABLES_MISSING` (eksik tablolar listelenir) gibi bir `reason` ve `hint` döner.
+
 ## Test
 
 ```bash
