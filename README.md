@@ -51,6 +51,27 @@ denetlenebilir kaydedildiği merkezi kupon yönetim sistemi.
 - FAZ 6: SettlementService + cron sonuç kontrolü (`CRON_SECRET`).
 - FAZ 7: push bildirim, monitoring, production hardening.
 
+## Giriş / Kayıt akışı (telefon + passkey)
+
+Tek ekran, tek alan: **telefon numarası**.
+
+1. Numara girilir → `POST /api/auth/identify` numaranın durumunu döner.
+2. **Kayıtlı + passkey var** → parmak izi / Face ID / cihaz kilidi istenir, giriş yapılır.
+3. **Kayıtsız** → ad soyad istenir → parmak izi ile passkey oluşturulur → üyelik + oturum
+   tek transaction'da yaratılır (`/api/auth/passkey/signup/{options,verify}`).
+4. **Kayıtlı ama passkey yok** (eski/seed hesap) → yalnızca demo modunda "Kodla Giriş" yedeği görünür.
+
+OTP ve PIN yöntemleri sonradan tanımlanacak. Passkey doğrulaması `userVerification: required`
+ile yapılır; ham biyometrik veri sunucuya hiç gelmez, yalnızca credential public key saklanır.
+
+> ⚠️ Telefon sahipliği henüz doğrulanmıyor (SMS/OTP yok): kayıtsız bir numarayı ilk giren
+> kişi o numarayı alır. OTP/PIN eklenince numara doğrulaması da eklenmelidir.
+
+Veritabanı: `supabase/migrations/011_passkey_auth.sql` (auth_identities, auth_sessions,
+member_credentials, auth_challenges, auth_otps) uygulanmalıdır. Bu migration ayrıca
+`profiles`/`members` tablolarındaki `auth.users` FK'lerini kaldırır. Partner/operatör rolü
+için ilgili kullanıcının `profiles.role` değeri SQL ile güncellenir.
+
 ## Demo hesaplar (seed)
 
 | Rol | Telefon | Not |
@@ -75,10 +96,11 @@ npm run dev
 
 ## Supabase + Vercel dağıtımı
 
-1. `supabase/migrations/001..009` sırayla uygulanır (idempotent, RLS + private
+1. `supabase/migrations/001..011` sırayla uygulanır (idempotent, RLS + private
    `coupon-images` bucket + storage policy'leri dahil).
-2. Vercel env: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   (anon JWT veya `sb_publishable_*`; secret anahtarlar asla `NEXT_PUBLIC_*`).
+2. Vercel env: `DATABASE_URL` (Supabase pooler), `NEXT_PUBLIC_SUPABASE_URL`,
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY` (anon JWT veya `sb_publishable_*`) ve görsel
+   yükleme için sunucu tarafı `SUPABASE_SERVICE_ROLE_KEY` (asla `NEXT_PUBLIC_*`).
 3. Development / Preview / Production Supabase projeleri **ayrı** tutulur.
 4. `AUTH_COOKIE_SECURE=true`, güçlü `AUTH_PEPPER`, `WEBAUTHN_RP_ID`/`ORIGIN`,
    `OTP_DEV_MODE=false` + SMS sağlayıcısı.
