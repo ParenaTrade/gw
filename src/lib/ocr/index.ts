@@ -1,78 +1,67 @@
-import { existsSync } from "node:fs";
-import path from "node:path";
-import { createWorker, type Worker } from "tesseract.js";
+import { azureReadAdapter } from "./adapters/azure-read";
+import { googleVisionAdapter } from "./adapters/google-vision";
+import { paddleBridgeAdapter } from "./adapters/paddle-bridge";
+import { tesseractAdapter } from "./adapters/tesseract";
+import type { OcrAdapter, OcrOutput, OcrProviderName } from "./types";
+
+export type { OcrOutput, OcrProviderName } from "./types";
 
 /**
- * OCR hattı:
- * 1. OCR_API_URL tanımlıysa PaddleOCR worker köprüsü (OpenCV perspektif
- *    düzeltmesi worker tarafında yapılır). Sözleşme: POST {image: base64}
- *    → {text: string, confidence: 0..1}.
- * 2. Değilse yerel tesseract.js (tur+eng, LSTM). Dil verisi ocr-data/
- *    dizininden yüklenir; yoksa CDN'e düşer.
- * Başarısızlıkta OCR_FAILED durumu üretilir (pipeline).
+ * OCR hattı (adapter katmanı). Sağlayıcı seçimi:
+ *   OCR_PROVIDER = auto (varsayılan) | paddle | google | azure | tesseract
+ * `auto` sırası: OCR_API_URL → paddle, GOOGLE_VISION_API_KEY → google,
+ * AZURE_VISION_ENDPOINT+AZURE_VISION_KEY → azure, hiçbiri yoksa tesseract.
+ *
+ * OCR_FALLBACK=tesseract: seçilen harici motor hata verirse yerel tesseract'a
+ * düşer. Hangi motorun kullanıldığı `ocr_results.engine` alanına yazıldığı için
+ * geri dönüş sessiz değildir. Her iki motor da başarısızsa hata fırlatılır ve
+ * pipeline kuponu OCR_FAILED yapar.
  */
 
-export type OcrOutput = {
-  text: string;
-  confidence: number;
-  engine: string;
-  durationMs: number;
+const ADAPTERS: Record<OcrProviderName, OcrAdapter> = {
+  paddle: paddleBridgeAdapter,
+  google: googleVisionAdapter,
+  azure: azureReadAdapter,
+  tesseract: tesseractAdapter,
 };
 
-const globalForOcr = globalThis as typeof globalThis & {
-  __kuponumOcrWorker?: Promise<Worker> | null;
-};
+const AUTO_ORDER: OcrProviderName[] = ["paddle", "google", "azure"];
 
-function getWorker(): Promise<Worker> {
-  if (!globalForOcr.__kuponumOcrWorker) {
-    const localLang = path.join(process.cwd(), "ocr-data");
-    const hasLocal = existsSync(path.join(localLang, "tur.traineddata.gz"));
-    globalForOcr.__kuponumOcrWorker = createWorker("tur+eng", 1, {
-      ...(hasLocal ? { langPath: localLang, gzip: true } : {}),
-      cachePath: path.join(process.cwd(), ".ocr-cache"),
-    }).catch((e) => {
-      globalForOcr.__kuponumOcrWorker = null;
-      throw e;
-    });
+export function resolveOcrAdapter(env: NodeJS.ProcessEnv = process.env): OcrAdapter {
+  const requested = (env.OCR_PROVIDER ?? "auto").trim().toLowerCase();
+  if (requested !== "auto") {
+    const adapter = ADAPTERS[requested as OcrProviderName];
+    if (!adapter) {
+      throw new Error(`OCR_PROVIDER geçersiz: "${requested}" (auto|paddle|google|azure|tesseract)`);
+    }
+    if (!adapter.isConfigured()) {
+      throw new Error(`OCR_PROVIDER=${requested} seçili ama gerekli env değişkenleri eksik`);
+    }
+    return adapter;
   }
-  return globalForOcr.__kuponumOcrWorker;
-}
-
-async function runPaddleBridge(image: Buffer): Promise<{ text: string; confidence: number }> {
-  const url = process.env.OCR_API_URL!.trim();
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(process.env.OCR_API_KEY ? { Authorization: `Bearer ${process.env.OCR_API_KEY}` } : {}),
-    },
-    signal: AbortSignal.timeout(60_000),
-    body: JSON.stringify({ image: image.toString("base64"), mime: "image/jpeg" }),
-  });
-  if (!res.ok) throw new Error(`OCR_API_URL ${res.status}`);
-  const data = (await res.json()) as { text?: unknown; confidence?: unknown };
-  if (typeof data.text !== "string") throw new Error("OCR köprüsü geçersiz yanıt");
-  const confidence = typeof data.confidence === "number" ? Math.max(0, Math.min(1, data.confidence)) : 0.5;
-  return { text: data.text, confidence };
+  for (const key of AUTO_ORDER) {
+    if (ADAPTERS[key].isConfigured()) return ADAPTERS[key];
+  }
+  return tesseractAdapter;
 }
 
 export async function runOcr(image: Buffer): Promise<OcrOutput> {
   const started = Date.now();
-  if (process.env.OCR_API_URL?.trim()) {
-    const { text, confidence } = await runPaddleBridge(image);
-    return { text, confidence, engine: "paddleocr-bridge", durationMs: Date.now() - started };
-  }
-  const worker = await getWorker();
+  const primary = resolveOcrAdapter();
   try {
-    const { data } = await worker.recognize(image);
-    return {
-      text: data.text ?? "",
-      confidence: Math.max(0, Math.min(1, (data.confidence ?? 0) / 100)),
-      engine: "tesseract.js",
-      durationMs: Date.now() - started,
-    };
+    const result = await primary.recognize(image);
+    return { ...result, engine: primary.name, durationMs: Date.now() - started };
   } catch (e) {
-    globalForOcr.__kuponumOcrWorker = null;
-    throw e;
+    const fallback = process.env.OCR_FALLBACK?.trim().toLowerCase() === "tesseract";
+    if (!fallback || primary === tesseractAdapter) throw e;
+    console.error(
+      JSON.stringify({
+        error_code: "OCR_PRIMARY_FALLBACK",
+        engine: primary.name,
+        message: e instanceof Error ? e.message : String(e),
+      }),
+    );
+    const result = await tesseractAdapter.recognize(image);
+    return { ...result, engine: `${tesseractAdapter.name} (fallback:${primary.name})`, durationMs: Date.now() - started };
   }
 }
