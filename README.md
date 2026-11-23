@@ -51,6 +51,24 @@ denetlenebilir kaydedildiği merkezi kupon yönetim sistemi.
 - FAZ 6: SettlementService + cron sonuç kontrolü (`CRON_SECRET`).
 - FAZ 7: push bildirim, monitoring, production hardening.
 
+## OCR bağlantısı (adapter katmanı)
+
+`src/lib/ocr/` — pipeline yalnızca `runOcr()` ile konuşur; motor `OCR_PROVIDER` ile seçilir
+(`auto` | `paddle` | `google` | `azure` | `tesseract`). `auto` sırası: `OCR_API_URL` →
+`GOOGLE_VISION_API_KEY` → `AZURE_VISION_ENDPOINT`+`AZURE_VISION_KEY` → yerel tesseract.
+
+| Motor | Env | Not |
+| --- | --- | --- |
+| `paddle` | `OCR_API_URL`, `OCR_API_KEY` | `ocr-bridge/` (Docker, PaddleOCR + OpenCV perspektif) |
+| `google` | `GOOGLE_VISION_API_KEY` | DOCUMENT_TEXT_DETECTION, tr+en ipucu |
+| `azure` | `AZURE_VISION_ENDPOINT`, `AZURE_VISION_KEY` | Image Analysis 4.0 `read` |
+| `tesseract` | `OCR_LANG_PATH` (ops.) | `ocr-data/` repoda; cache `os.tmpdir()` (serverless uyumlu) |
+
+`OCR_FALLBACK=tesseract` → harici motor düşerse yerel motora geçilir; kullanılan motor
+`ocr_results.engine` alanına yazılır (ör. `tesseract.js (fallback:google-vision)`).
+Tüm env'ler için `.env.example`. Yeni motor eklemek: `OcrAdapter` arayüzünü uygulayan bir
+dosya + `src/lib/ocr/index.ts` içindeki `ADAPTERS` kaydı.
+
 ## Giriş / Kayıt akışı (telefon + passkey)
 
 Tek ekran, tek alan: **telefon numarası**.
